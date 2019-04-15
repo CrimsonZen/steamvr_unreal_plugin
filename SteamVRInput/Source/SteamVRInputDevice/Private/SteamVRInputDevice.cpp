@@ -101,14 +101,6 @@ static const int32 kMirrorTranslationOnlyBones[] = {
 FSteamVRInputDevice::FSteamVRInputDevice(const TSharedRef<FGenericApplicationMessageHandler>& InMessageHandler)
 	: MessageHandler(InMessageHandler)
 {
-	// Setup controller states
-	//FMemory::Memzero(ControllerStates, sizeof(ControllerStates));
-	//NumControllersMapped = 0;
-	//NumTrackersMapped = 0;
-
-	InitialButtonRepeatDelay = 0.2f;
-	ButtonRepeatDelay = 0.1f;
-
 	// Initializations
 	InitSteamVRSystem();
 	InitControllerMappings();
@@ -180,13 +172,13 @@ void FSteamVRInputDevice::InitSteamVRSystem()
 		if (SteamVRInputError == VRInitError_None)
 		{
 			LastInputError = VRInput->GetActionHandle(TCHAR_TO_UTF8(*FString(TEXT(ACTION_PATH_VIBRATE_LEFT))), &VRVibrationLeft);
-			if (LastInputError != VRInputError_None)
+			if (LastInputError != VRInputError_None || VRVibrationLeft == k_ulInvalidActionHandle)
 			{
 				VRVibrationLeft = k_ulInvalidActionHandle;
 			}
 
 			LastInputError = VRInput->GetActionHandle(TCHAR_TO_UTF8(*FString(TEXT(ACTION_PATH_VIBRATE_RIGHT))), &VRVibrationRight);
-			if (LastInputError != VRInputError_None)
+			if (LastInputError != VRInputError_None || VRVibrationRight == k_ulInvalidActionHandle)
 			{
 				VRVibrationRight = k_ulInvalidActionHandle;
 			}
@@ -287,6 +279,7 @@ bool FSteamVRInputDevice::GetSkeletalData(bool bLeftHand, bool bMirror, EVRSkele
 		// Get skeletal data
 		VRBoneTransform_t SteamVRBoneTransforms[STEAMVR_SKELETON_BONE_COUNT];
 		EVRInputError Err = VRInput->GetSkeletalBoneData(ActionHandle, vr::EVRSkeletalTransformSpace::VRSkeletalTransformSpace_Parent, MotionRange, SteamVRBoneTransforms, STEAMVR_SKELETON_BONE_COUNT);
+		
 		if (Err != VRInputError_None)
 		{
 			return false;
@@ -371,7 +364,7 @@ void FSteamVRInputDevice::SendAnalogMessage(const ETrackedControllerRole Tracked
 
 void FSteamVRInputDevice::SendControllerEvents()
 {
-	if (SteamVRSystem != NULL && VRInput != NULL)
+	if (VRSystem() && VRInput != NULL)
 	{
 		// Set our active action set here
 		VRActiveActionSet_t ActiveActionSets[] = {
@@ -383,21 +376,34 @@ void FSteamVRInputDevice::SendControllerEvents()
 		};
 
 		EVRInputError ActionStateError = VRInput->UpdateActionState(ActiveActionSets, sizeof(VRActiveActionSet_t), 1);
+		
 		if (ActionStateError != VRInputError_None)
 		{
-			GetInputError(LastInputError, TEXT("Error encountered when trying to update the action state"));
+			//GetInputError(ActionStateError, TEXT("Error encountered when trying to update the action state"));
 			return;
 		}
 
 		// Go through Actions
 		for (auto& Action : Actions)
 		{
+			if (Action.Handle == k_ulInvalidActionHandle)
+			{
+				continue;
+			}
+
 			if (Action.Type == EActionType::Boolean && !Action.Path.Contains(TEXT(" axis")) && !Action.Path.Contains(TEXT("_axis")))
 			{
 				// Get digital data from SteamVR
 				InputDigitalActionData_t DigitalData;
 				ActionStateError = VRInput->GetDigitalActionData(Action.Handle, &DigitalData, sizeof(DigitalData), k_ulInvalidInputValueHandle);
-				if (ActionStateError == VRInputError_None &&
+				
+				if (ActionStateError != VRInputError_None)
+				{
+					//GetInputError(ActionStateError, TEXT("Error encountered retrieving digital data from SteamVR"));
+					//UE_LOG(LogSteamVRInputDevice, Error, TEXT("%s"), *Action.Path);
+					continue;
+				}
+				else if (ActionStateError == VRInputError_None &&
 					DigitalData.bActive &&
 					DigitalData.bState != Action.bState
 					)
@@ -423,12 +429,6 @@ void FSteamVRInputDevice::SendControllerEvents()
 						}
 					}
 				}
-				else if (ActionStateError != Action.LastError)
-				{
-					GetInputError(ActionStateError, TEXT("Error encountered retrieving digital data from SteamVR"));
-					UE_LOG(LogSteamVRInputDevice, Error, TEXT("%s"), *Action.Path);
-				}
-				Action.LastError = ActionStateError;
 			}
 			else if (Action.Type == EActionType::Vector1
 				|| Action.Type == EActionType::Vector2
@@ -437,7 +437,13 @@ void FSteamVRInputDevice::SendControllerEvents()
 				// Get analog data from SteamVR
 				InputAnalogActionData_t AnalogData;
 				ActionStateError = VRInput->GetAnalogActionData(Action.Handle, &AnalogData, sizeof(AnalogData), k_ulInvalidInputValueHandle);
-				if (ActionStateError == VRInputError_None && AnalogData.bActive)
+				
+				if (ActionStateError != VRInputError_None)
+				{
+					//GetInputError(ActionStateError, TEXT("Error encountered retrieving analog data from SteamVR"));
+					continue;
+				}
+				else if (ActionStateError == VRInputError_None && AnalogData.bActive)
 				{
 					// Find the temporary action key (X)
 					FKey FoundKeyX;
@@ -547,11 +553,6 @@ void FSteamVRInputDevice::SendControllerEvents()
 						MessageHandler->OnControllerAnalog(FoundKeyY.GetFName(), 0, Action.Value.Y);
 					}
 				}
-				else if (ActionStateError != Action.LastError)
-				{
-					GetInputError(ActionStateError, TEXT("Error encountered retrieving analog data from SteamVR"));
-				}
-				Action.LastError = ActionStateError;
 			}
 		}
 	}
@@ -583,10 +584,11 @@ bool FSteamVRInputDevice::GetControllerOrientationAndPosition(const int32 Contro
 			if (LeftActionHandle != vr::k_ulInvalidActionHandle)
 			{
 				InputError = VRInput->GetPoseActionData(LeftActionHandle, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
-			}
-			else
-			{
-				return true;
+
+				if (InputError != VRInputError_None || LeftActionHandle == k_ulInvalidActionHandle)
+				{
+					return false;
+				}
 			}
 			break;
 		case EControllerHand::Right:
@@ -594,38 +596,133 @@ bool FSteamVRInputDevice::GetControllerOrientationAndPosition(const int32 Contro
 			if (RightActionHandle != vr::k_ulInvalidActionHandle)
 			{
 				InputError = VRInput->GetPoseActionData(RightActionHandle, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
-			}
-			else
-			{
-				return true;
+
+				if (InputError != VRInputError_None)
+				{
+					return false;
+				}
 			}
 			break;
 		case EControllerHand::Special_1:
+
+			if (VRSpecial1 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial1, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
 			break;
 		case EControllerHand::Special_2:
+
+			if (VRSpecial2 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial2, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
 			break;
 		case EControllerHand::Special_3:
+			
+			if (VRSpecial3 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial3, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
+
 			break;
 		case EControllerHand::Special_4:
+			
+			if (VRSpecial4 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial4, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
+
 			break;
 		case EControllerHand::Special_5:
+			
+			if (VRSpecial5 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial5, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
+
 			break;
 		case EControllerHand::Special_6:
+			
+			if (VRSpecial6 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial6, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
+
 			break;
 		case EControllerHand::Special_7:
+			
+			if (VRSpecial7 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial7, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
+
 			break;
 		case EControllerHand::Special_8:
+			
+			if (VRSpecial8 == k_ulInvalidActionHandle)
+			{
+				return false;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial8, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return false;
+			}
+
 			break;
 		default:
-			break;
+			return false;
 		}
 
 		if (InputError == VRInputError_None)
@@ -675,34 +772,154 @@ ETrackingStatus FSteamVRInputDevice::GetControllerTrackingStatus(const int32 Con
 		switch (DeviceHand)
 		{
 		case EControllerHand::Left:
+
+			if (VRControllerHandleLeft == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRControllerHandleLeft, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+			
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Right:
+
+			if (VRControllerHandleRight == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRControllerHandleRight, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_1:
+
+			if (VRSpecial1 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial1, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_2:
+
+			if (VRSpecial2 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial2, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_3:
+
+			if (VRSpecial3 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial3, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_4:
+
+			if (VRSpecial4 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			} 
+
 			InputError = VRInput->GetPoseActionData(VRSpecial4, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_5:
+
+			if (VRSpecial5 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial5, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_6:
+
+			if (VRSpecial6 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			} 
+
 			InputError = VRInput->GetPoseActionData(VRSpecial6, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_7:
+
+			if (VRSpecial7 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial7, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		case EControllerHand::Special_8:
+
+			if (VRSpecial8 == k_ulInvalidActionHandle)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			InputError = VRInput->GetPoseActionData(VRSpecial8, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+
+			if (InputError != VRInputError_None)
+			{
+				return ETrackingStatus::NotTracked;
+			}
+
 			break;
 		default:
 			break;
@@ -724,10 +941,32 @@ void FSteamVRInputDevice::GetControllerFidelity()
 		InputPoseActionData_t PoseData = {};
 		EVRInputError InputError = VRInputError_NoData;
 
+		if (VRControllerHandleLeft == k_ulInvalidActionHandle)
+		{
+			return;
+		}
+
 		InputError = VRInput->GetPoseActionData(VRControllerHandleLeft, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+		
+		if (InputError != VRInputError_None)
+		{
+			return;
+		}
+		
 		if (PoseData.bActive && PoseData.pose.bDeviceIsConnected)
 		{
+			if (VRSkeletalHandleLeft == k_ulInvalidActionHandle)
+			{
+				return;
+			}
+
 			VRInput->GetSkeletalTrackingLevel(VRSkeletalHandleLeft, &LeftControllerFidelity);
+
+			if (InputError != VRInputError_None)
+			{
+				return;
+			}
+
 			bIsSkeletalControllerLeftPresent = (LeftControllerFidelity >= VRSkeletalTracking_Partial);
 		}
 		else
@@ -736,10 +975,26 @@ void FSteamVRInputDevice::GetControllerFidelity()
 			LeftControllerFidelity = EVRSkeletalTrackingLevel::VRSkeletalTracking_Estimated;
 		}
 
+		if (VRControllerHandleRight == k_ulInvalidActionHandle)
+		{
+			return;
+		}
+
 		InputError = VRInput->GetPoseActionData(VRControllerHandleRight, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
 		if (PoseData.bActive && PoseData.pose.bDeviceIsConnected)
 		{
+			if (VRSkeletalHandleRight == k_ulInvalidActionHandle)
+			{
+				return;
+			}
+
 			VRInput->GetSkeletalTrackingLevel(VRSkeletalHandleRight, &RightControllerFidelity);
+
+			if (InputError != VRInputError_None)
+			{
+				return;
+			}
+
 			bIsSkeletalControllerRightPresent = (RightControllerFidelity >= VRSkeletalTracking_Partial);
 		} 
 		else
@@ -757,7 +1012,18 @@ void FSteamVRInputDevice::GetLeftHandPoseData(FVector& Position, FRotator& Orien
 
 	if (bIsSkeletalControllerRightPresent && VRInput != NULL)
 	{
+		if (VRSkeletalHandleLeft == k_ulInvalidActionHandle)
+		{
+			return;
+		}
+
 		InputError = VRInput->GetPoseActionData(VRSkeletalHandleLeft, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+		
+		if (InputError != VRInputError_None || VRSkeletalHandleLeft == k_ulInvalidActionHandle)
+		{
+			return;
+		}
+		
 		if (PoseData.bActive && PoseData.pose.bDeviceIsConnected && InputError == VRInputError_None)
 		{
 			GetUETransform(PoseData, Position, Orientation);
@@ -782,7 +1048,18 @@ void FSteamVRInputDevice::GetRightHandPoseData(FVector& Position, FRotator& Orie
 
 	if (bIsSkeletalControllerRightPresent && VRInput != NULL)
 	{
+		if (VRSkeletalHandleRight == k_ulInvalidActionHandle)
+		{
+			return;
+		}
+
 		InputError = VRInput->GetPoseActionData(VRSkeletalHandleRight, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
+		
+		if (InputError != VRInputError_None)
+		{
+			return;
+		}
+
 		if (PoseData.bActive && PoseData.pose.bDeviceIsConnected && InputError == VRInputError_None)
 		{
 			GetUETransform(PoseData, Position, Orientation);
@@ -2833,6 +3110,12 @@ void FSteamVRInputDevice::RegisterApplication(FString ManifestPath)
 		{
 			VRActionHandle_t Handle;
 			InputError = VRInput->GetActionHandle(TCHAR_TO_UTF8(*Action.Path), &Handle);
+
+			if (InputError != VRInputError_None || Handle == k_ulInvalidActionHandle)
+			{
+				continue;
+			}
+
 			Action.Handle = Handle;
 
 			// Test if this is a pose
@@ -2889,10 +3172,11 @@ bool FSteamVRInputDevice::SetSkeletalHandle(char* ActionPath, VRActionHandle_t& 
 	{
 		// Get Skeletal Handle
 		EVRInputError Err = VRInput->GetActionHandle(ActionPath, &SkeletalHandle);
-		if ((Err != VRInputError_None || !SkeletalHandle) && Err != LastInputError)
+		if (Err != VRInputError_None || SkeletalHandle == k_ulInvalidActionHandle)
 		{
-			GetInputError(Err, TEXT("Couldn't get skeletal action handle for Skeleton."));
-			Err = LastInputError;
+			//GetInputError(Err, TEXT("Couldn't get skeletal action handle for Skeleton."));
+			//Err = LastInputError;
+			return false;
 		}
 		else
 		{
