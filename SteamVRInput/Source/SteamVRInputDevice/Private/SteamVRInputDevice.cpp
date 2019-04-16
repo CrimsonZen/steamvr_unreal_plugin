@@ -585,7 +585,7 @@ bool FSteamVRInputDevice::GetControllerOrientationAndPosition(const int32 Contro
 			{
 				InputError = VRInput->GetPoseActionData(LeftActionHandle, VRCompositor()->GetTrackingSpace(), 0, &PoseData, sizeof(PoseData), k_ulInvalidInputValueHandle);
 
-				if (InputError != VRInputError_None || LeftActionHandle == k_ulInvalidActionHandle)
+				if (InputError != VRInputError_None)
 				{
 					return false;
 				}
